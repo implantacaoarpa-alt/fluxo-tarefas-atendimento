@@ -4,7 +4,9 @@
 //   chamar     (AI_API_KEY)   uma única chamada ao provedor, com timeout (ou simulação em dry-run). Sem GITHUB_TOKEN.
 //   registrar  (GITHUB_TOKEN) valida a resposta FORA do modelo, grava o relatório e o estado na issue.
 //   aplicar    (sem segredos) aplica as edições validadas na cópia de trabalho, para o build no job sem segredos.
-//   abrir-pr   (GITHUB_TOKEN) cria branch, commit e PR pela API. Não faz merge nem fecha a issue.
+//   abrir-pr   (GITHUB_TOKEN) cria branch, commit e PR pela API (ou atualiza o MESMO PR na correção).
+//   entregar   (GITHUB_TOKEN) confere origem do PR, requestId, caminhos e build do commit atual; faz merge só
+//              com AUTO_MERGE=true (sem bypass das regras), responde pelo N1 e fecha a issue.
 // Título, corpo, comentários e respostas da IA são dados não confiáveis: nunca viram comando de shell.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -21,13 +23,19 @@ export const PERMITIDOS = [
   "client/src/TelaQuadro.jsx", "client/src/Lista.jsx", "client/src/Cartao.jsx", "client/src/ordem.js", "client/src/estilos.css",
   "server/src/quadros.js", "client/test/ordem.test.js", "server/test/quadros.test.js",
 ];
-const FINAIS = ["resultado", "simulado", "pr_aberto", "concluido", "pr_fechado", "encerrado"];
+const FINAIS = ["resultado", "simulado", "concluido", "pr_fechado", "encerrado", "pendente_instrutor"];
+const AGUARDANDO_ENTREGA = ["pr_aberto", "aguardando_merge"];
+const MAX_CORRECOES = 1;
+const WORKFLOW = "ai-agents.yml";
 const PEDEM_RETOMADA = ["incerto", "erro_ia", "invalido"];
 const SEGREDO = /(ghp_|gho_|ghs_|github_pat_|sk-[A-Za-z0-9_-]{8,}|AI_API_KEY|COPILOT_AGENT_TOKEN|GITHUB_TOKEN|PRIVATE KEY)/;
 const LIMITES = { edits: 5, trecho: 20_000, publico: 1000, interno: 1000, updates: 10 };
 
 export const caminhoDoResultado = (requestId) => `automacao/resultados/${requestId}.json`;
 export const branchDaIssue = (numero) => `ai/issue-${numero}`;
+// Não diz que a máquina do cliente já está atualizada: o app local precisa ser atualizado.
+export const mensagemIntegrado = (pr) =>
+  `Seu pedido foi integrado ao código do Fluxo (PR #${pr}). Para ver a mudança no seu app local, atualize o projeto e reinicie o app.`;
 
 /** Vínculo criado pelo backend: autor confiável + marcadores de pedido e runtime. O rótulo sozinho não basta. */
 export function lerOrigem(issue, autorConfiavel) {
@@ -49,7 +57,7 @@ export const pedidoDaIssue = (issue) =>
 const semFrontmatter = (texto) => texto.replace(/\r/g, "").replace(/^---\n[\s\S]*?\n---\n/, "").trim();
 
 /** Entrada do coordenador: instruções dos agentes (lidas da main) + contexto + arquivos permitidos + pedido como dado. */
-export function montarEntrada({ issue, estado, ler }) {
+export function montarEntrada({ issue, estado, ler, base = {}, correcao = null }) {
   const instrucoes = PAPEIS.map((p) => `## Agente ${p}\n\n${semFrontmatter(ler(`.github/agents/${p}.agent.md`))}`).join("\n\n");
   const system = [
     instrucoes,
@@ -63,7 +71,8 @@ export function montarEntrada({ issue, estado, ler }) {
     "edits só existe para outcome \"code\": lista de {path, find, replace}. `find` deve aparecer exatamente uma vez no arquivo atual mostrado abaixo.",
     "Para os outros outcomes: allowedFiles, criteria e edits vazios.",
   ].join("\n");
-  const arquivos = [...CONTEXTO, ...PERMITIDOS].map((c) => `### ${c}\n\`\`\`\n${ler(c)}\n\`\`\``).join("\n\n");
+  const conteudo = (c) => base[c] ?? ler(c);
+  const arquivos = [...CONTEXTO, ...PERMITIDOS].map((c) => `### ${c}\n\`\`\`\n${conteudo(c)}\n\`\`\``).join("\n\n");
   const user = [
     `requestId: ${estado.requestId}`,
     `resultPath: ${estado.resultPath}`,
@@ -74,7 +83,12 @@ export function montarEntrada({ issue, estado, ler }) {
     pedidoDaIssue(issue),
     "PEDIDO>>>",
     "",
-    "Contexto e arquivos atuais (da main):",
+    ...(correcao ? [
+      `CORREÇÃO (rodada única, mesmo PR #${correcao.pr}, requestId ${estado.requestId}): ${correcao.erro}`,
+      "Corrija com o mínimo de edições sobre os arquivos atuais da branch do PR mostrados abaixo.",
+      "",
+    ] : []),
+    `Contexto e arquivos atuais (${correcao ? `branch ${branchDaIssue(estado.issue)}` : "main"}):`,
     arquivos,
   ].join("\n");
   return { system, user };
@@ -91,7 +105,8 @@ export function simulacao(requestId) {
     criteria: [{ id: "c1", description: "Cartão com descrição mostra o selo \"Com descrição\"." }],
     updates: [
       { id: "u1-entendimento", agent: "n1", internalText: "Pedido fictício: renomear o selo do cartão.", publicText: "(Simulação) Entendemos seu pedido e já estamos olhando." },
-      { id: "u2-implementado", agent: "desenvolvedor", internalText: "Selo alterado em client/src/Cartao.jsx.", publicText: "(Simulação) O ajuste foi preparado e está em revisão." },
+      { id: "u2-implementado", agent: "desenvolvedor", internalText: "Selo alterado em client/src/Cartao.jsx. Conferência no app não feita: o runner não abre o app; vale o build do workflow.", publicText: "(Simulação) O ajuste foi preparado e está em revisão." },
+      { id: "u3-revisado", agent: "revisor", internalText: "Diff só em Cartao.jsx e troca o texto do selo: atende o critério c1.", publicText: "(Simulação) O ajuste passou pela revisão." },
     ],
     edits: [{ path: "client/src/Cartao.jsx", find: "            Descrição", replace: "            Com descrição" }],
   };
@@ -141,6 +156,7 @@ export function validarResultado(texto, { requestId, ler }) {
   if (r.outcome === "code") {
     if (!criteria.length || !criteria.every((c) => typeof c?.id === "string" && textoSeguro(c.description, 300))) erros.push("code exige critério com id e description");
     if (!edits.length || edits.length > LIMITES.edits) erros.push("code exige de 1 a 5 edições");
+    for (const papel of ["desenvolvedor", "revisor"]) if (!updates.some((u) => u?.agent === papel)) erros.push(`code exige update do ${papel}`);
     for (const f of allowedFiles) if (!PERMITIDOS.includes(f)) erros.push(`arquivo fora do escopo: ${String(f).slice(0, 80)}`);
     for (const e of edits) erros.push(...validarEdicao(e, allowedFiles, ler));
   } else if (allowedFiles.length || criteria.length || edits.length) {
@@ -187,7 +203,9 @@ export function resumoInterno(estado) {
   for (const u of estado.interno ?? []) linhas.push(`- ${limpar(u.agent)}: ${limpar(u.internalText)}`);
   if (estado.erro) linhas.push(`- atenção: ${limpar(estado.erro)}`);
   // O JSON oculto guarda só o necessário para retomar e para o app: sem textos internos.
+  // O erro curto fica (sanitizado) porque a rodada de correção o usa na execução seguinte.
   const { interno, criteria, agents, erro, ...persistido } = estado;
+  if (erro) persistido.erro = limpar(erro).slice(0, 300);
   linhas.push("", `<!-- fluxo-ai-estado ${JSON.stringify(persistido)} -->`);
   return linhas.join("\n");
 }
@@ -211,10 +229,49 @@ async function lerEstado(github, repo, numero) {
 }
 
 async function salvarEstado(github, repo, numero, comentarioId, estado) {
+  // Sequência das etapas já vividas (curta): o app transforma cada etapa nova numa mensagem do N1.
+  if (estado.marcos?.at(-1) !== estado.fase) estado.marcos = [...(estado.marcos ?? []), estado.fase].slice(-20);
   if (comentarioId) return void (await github("PATCH", `/repos/${repo}/issues/comments/${comentarioId}`, { body: resumoInterno(estado) }));
   const criado = await github("POST", `/repos/${repo}/issues/${numero}/comments`, { body: resumoInterno(estado) });
   estado.mensagens = [...(estado.mensagens ?? []), criado.id];
   await github("PATCH", `/repos/${repo}/issues/comments/${criado.id}`, { body: resumoInterno(estado) });
+}
+
+async function lerDaBranch(github, repo, branch) {
+  const base = {};
+  for (const c of PERMITIDOS) {
+    const r = await github("GET", `/repos/${repo}/contents/${c}?ref=${encodeURIComponent(branch)}`);
+    base[c] = Buffer.from(r.content, "base64").toString("utf8").replace(/\r\n/g, "\n");
+  }
+  return base;
+}
+
+/** Resposta curta do N1 na issue (ID estável por requestId) e no app (update "entrega"); depois fecha a issue. */
+export async function entregarResposta(github, repo, numero, estado, texto) {
+  const marca = `<!-- fluxo-entrega ${estado.requestId} -->`;
+  const comentarios = await github("GET", `/repos/${repo}/issues/${numero}/comments?per_page=100`);
+  if (!comentarios.some((c) => c.user?.login === BOT && c.body.includes(marca))) {
+    const c = await github("POST", `/repos/${repo}/issues/${numero}/comments`, { body: `**Resposta do N1 ao cliente**\n\n${texto}\n\n${marca}` });
+    estado.mensagens = [...(estado.mensagens ?? []), c.id];
+  }
+  if (!(estado.updates ?? []).some((u) => u.id === "entrega")) estado.updates = [...(estado.updates ?? []), { id: "entrega", publicText: texto }];
+  const issue = await github("GET", `/repos/${repo}/issues/${numero}`);
+  if (issue.state !== "closed") await github("PATCH", `/repos/${repo}/issues/${numero}`, { state: "closed", state_reason: "completed" });
+  estado.fase = "concluido";
+}
+
+/** Para aceitar código: só origem do PR, requestId e caminhos de produto permitidos (o build vem do job sem segredos). */
+export function conferirPr({ pr, arquivos, estado }) {
+  const problemas = [];
+  if (pr.head?.ref !== branchDaIssue(estado.issue) || pr.base?.ref !== "main") problemas.push("PR não é da branch da automação para a main");
+  if (pr.user?.login !== BOT) problemas.push("PR não foi aberto pela automação");
+  if (!(pr.body ?? "").includes(estado.requestId)) problemas.push("PR sem o requestId do pedido");
+  for (const a of arquivos) {
+    for (const nome of [a.filename, a.previous_filename].filter(Boolean)) {
+      if (!PERMITIDOS.includes(nome) && nome !== estado.resultPath) problemas.push(`arquivo fora do escopo: ${nome}`);
+    }
+  }
+  return problemas;
 }
 
 /**
@@ -250,11 +307,17 @@ export async function executar(modo, env, io = {}) {
     saidas.request_id = estado.requestId;
     const salvar = () => salvarEstado(github, repo, numero, lido.comentarioId, estado);
 
+    Object.assign(saidas, { issue: String(numero), branch: branchDaIssue(numero), base_ref: "main" });
     if (pr) {
       if (pr.number !== estado.pr || pr.state !== "closed") { log("PR não é o registrado para esta issue."); return saidas; }
-      estado.fase = pr.merged ? "concluido" : "pr_fechado";
+      if (FINAIS.includes(estado.fase)) { log(`Issue #${numero} já está em ${estado.fase}: nada a repetir.`); return saidas; }
+      if (!pr.merged) { estado.fase = "pr_fechado"; await salvar(); log(`Issue #${numero}: PR #${pr.number} fechado sem merge.`); return saidas; }
+      // Merge confirmado: registra antes de responder, para uma falha depois daqui retomar só a resposta.
+      estado.fase = "integrado";
       await salvar();
-      log(`Issue #${numero}: PR #${pr.number} ${pr.merged ? "integrado" : "fechado sem merge"}.`);
+      await entregarResposta(github, repo, numero, estado, mensagemIntegrado(pr.number));
+      await salvar();
+      log(`Issue #${numero}: PR #${pr.number} integrado; resposta publicada e issue fechada.`);
       return saidas;
     }
     if (evento === "issues" && payload.action === "closed") {
@@ -265,6 +328,20 @@ export async function executar(modo, env, io = {}) {
 
     const retomar = evento === "workflow_dispatch" && payload.inputs?.retomar === "sim";
     if (FINAIS.includes(estado.fase)) { log(`Issue #${numero} já está em ${estado.fase}: nada a repetir.`); return saidas; }
+    if (estado.fase === "integrado") {
+      // Falha depois do merge: retoma só a resposta e o fechamento.
+      await entregarResposta(github, repo, numero, estado, mensagemIntegrado(estado.pr));
+      await salvar();
+      log(`Issue #${numero}: retomada pós-merge concluída.`);
+      return saidas;
+    }
+    if (AGUARDANDO_ENTREGA.includes(estado.fase)) {
+      // PR já existe: só confere o build do commit atual e entrega, sem chamar a IA.
+      Object.assign(saidas, { verificar: "true" });
+      log(`Issue #${numero}: PR #${estado.pr} em ${estado.fase}; reconferindo build e entrega.`);
+      return saidas;
+    }
+    const correcao = estado.fase === "corrigir" ? { pr: estado.pr, erro: estado.erro } : null;
     if (estado.fase === "proposta") {
       // A IA já respondeu; falta só o PR. Retoma usando o artifact da execução registrada, sem nova chamada.
       Object.assign(saidas, { proposta: "true", artefato_run: String(estado.runId) });
@@ -278,14 +355,18 @@ export async function executar(modo, env, io = {}) {
     }
     if (PEDEM_RETOMADA.includes(estado.fase) && !retomar) { log(`Issue #${numero} em ${estado.fase}: confira e retome com workflow_dispatch retomar=sim.`); return saidas; }
     const limite = Number(env.AI_MAX_CALLS ?? 1);
-    if (estado.chamadas >= limite && !retomar) { log(`Issue #${numero}: limite de ${limite} chamada(s) atingido.`); return saidas; }
+    // A rodada de correção já é limitada pelo entregar (MAX_CORRECOES); não conta no limite do pedido inicial.
+    if (!correcao && estado.chamadas >= limite && !retomar) { log(`Issue #${numero}: limite de ${limite} chamada(s) atingido.`); return saidas; }
 
     // Monta a entrada primeiro (se faltar arquivo, falha sem marcar chamada). Depois registra a intenção
     // ANTES de chamar: se o job morrer, a próxima execução vê "chamando" e não repete às cegas.
-    const entrada = montarEntrada({ issue, estado, ler });
-    Object.assign(estado, { fase: "chamando", chamadas: estado.chamadas + 1, runId: Number(env.GITHUB_RUN_ID) || null, erro: undefined });
+    const base = correcao ? await lerDaBranch(github, repo, branchDaIssue(numero)) : Object.fromEntries(PERMITIDOS.map((c) => [c, ler(c).replace(/\r\n/g, "\n")]));
+    const entrada = montarEntrada({ issue, estado, ler, base, correcao });
+    Object.assign(estado, { fase: "chamando", chamadas: estado.chamadas + 1, runId: Number(env.GITHUB_RUN_ID) || null, erro: undefined, correcao: Boolean(correcao) });
     await salvar();
     arquivo.gravar("entrada.json", entrada);
+    arquivo.gravar("arquivos.json", base);
+    if (correcao) saidas.base_ref = branchDaIssue(numero);
     arquivo.gravar("contexto.json", { issue: numero, requestId: estado.requestId, resultPath: estado.resultPath, runId: estado.runId });
     Object.assign(saidas, { chamar: "true" });
     return saidas;
@@ -311,7 +392,8 @@ export async function executar(modo, env, io = {}) {
       estado.fase = resposta.tipo === "incerto" ? "incerto" : "erro_ia";
       estado.erro = resposta.erro;
     } else {
-      const v = validarResultado(resposta.texto, { requestId: estado.requestId, ler });
+      const base = arquivo.ler("arquivos.json");
+      const v = validarResultado(resposta.texto, { requestId: estado.requestId, ler: (c) => base[c] ?? ler(c) });
       if (!v.ok) {
         estado.fase = "invalido";
         estado.erro = `resposta recusada pela validação: ${v.erros.slice(0, 5).join("; ")}`;
@@ -326,8 +408,9 @@ export async function executar(modo, env, io = {}) {
           arquivo.gravar("edits.json", { allowedFiles: r.allowedFiles, edits: v.edits, resultPath: estado.resultPath });
           Object.assign(saidas, { proposta: "true", artefato_run: String(estado.runId) });
         }
-        // Em dry-run o resultado simulado é final: nada de PR.
+        // Em dry-run o resultado simulado é final: nada de PR. Dúvida respondida fecha; os demais sem código ficam abertos.
         estado.fase = resposta.simulado ? "simulado" : r.outcome === "code" ? "proposta" : "resultado";
+        if (estado.fase === "resultado" && r.outcome === "answered") await entregarResposta(github, repo, contexto.issue, estado, r.publicText);
       }
     }
     await salvarEstado(github, repo, contexto.issue, lido.comentarioId, estado);
@@ -347,20 +430,30 @@ export async function executar(modo, env, io = {}) {
     const github = io.github ?? clienteGitHub(env.GITHUB_TOKEN);
     const { allowedFiles, edits, resultPath } = arquivo.ler("edits.json");
     const relatorio = arquivo.ler("relatorio.json");
+    const base = arquivo.ler("arquivos.json");
     const numero = Number(arquivo.ler("contexto.json").issue);
     const lido = await lerEstado(github, repo, numero);
     const estado = lido.estado;
-    if (!estado || estado.requestId !== relatorio.requestId || estado.fase !== "proposta" || estado.pr) { log("Estado não pede PR (já aberto ou mudou)."); return saidas; }
+    if (!estado || estado.requestId !== relatorio.requestId || estado.fase !== "proposta" || (estado.pr && !estado.correcao)) { log("Estado não pede PR (já aberto ou mudou)."); return saidas; }
 
     const branch = branchDaIssue(numero);
-    const main = await github("GET", `/repos/${repo}/git/ref/heads/main`);
-    try { await github("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: main.object.sha }); }
-    catch (e) { if (e.status !== 422) throw e; log(`Branch ${branch} já existe: reaproveitada.`); }
-    const arquivos = { ...aplicarEdicoes(edits, allowedFiles, ler), [resultPath]: `${JSON.stringify(relatorio, null, 2)}\n` };
+    if (!estado.correcao) {
+      const main = await github("GET", `/repos/${repo}/git/ref/heads/main`);
+      try { await github("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: main.object.sha }); }
+      catch (e) { if (e.status !== 422) throw e; log(`Branch ${branch} já existe: reaproveitada.`); }
+    }
+    const arquivos = { ...aplicarEdicoes(edits, allowedFiles, (c) => base[c] ?? ler(c)), [resultPath]: `${JSON.stringify(relatorio, null, 2)}\n` };
     for (const [caminho, conteudo] of Object.entries(arquivos)) {
       let sha;
       try { sha = (await github("GET", `/repos/${repo}/contents/${caminho}?ref=${encodeURIComponent(branch)}`)).sha; } catch (e) { if (e.status !== 404) throw e; }
       await github("PUT", `/repos/${repo}/contents/${caminho}`, { message: `ai: ${relatorio.requestId} (${caminho})`, content: Buffer.from(conteudo).toString("base64"), branch, ...(sha ? { sha } : {}) });
+    }
+    if (estado.correcao) {
+      const atual = await lerEstado(github, repo, numero);
+      Object.assign(atual.estado, { fase: "pr_aberto", correcao: false });
+      await salvarEstado(github, repo, numero, atual.comentarioId, atual.estado);
+      log(`Issue #${numero}: correção enviada ao MESMO PR #${estado.pr}.`);
+      return saidas;
     }
     const [dono] = repo.split("/");
     const existentes = await github("GET", `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${dono}:${branch}`)}`);
@@ -379,6 +472,63 @@ export async function executar(modo, env, io = {}) {
     Object.assign(atual.estado, { pr: pr.number, fase: "pr_aberto" });
     await salvarEstado(github, repo, numero, atual.comentarioId, atual.estado);
     log(`Issue #${numero}: PR #${pr.number} aberto.`);
+    return saidas;
+  }
+
+  if (modo === "entregar") {
+    const github = io.github ?? clienteGitHub(env.GITHUB_TOKEN);
+    const numero = Number(env.ISSUE_NUMBER);
+    const lido = await lerEstado(github, repo, numero);
+    const estado = lido.estado;
+    if (!estado || !AGUARDANDO_ENTREGA.includes(estado.fase) || !estado.pr) { log(`Issue #${numero}: nada a entregar (fase ${estado?.fase}).`); return saidas; }
+    const salvar = () => salvarEstado(github, repo, numero, lido.comentarioId, estado);
+    const pr = await github("GET", `/repos/${repo}/pulls/${estado.pr}`);
+    if (pr.state !== "open") { log(`PR #${estado.pr} não está aberto: o evento de fechamento cuida da entrega.`); return saidas; }
+
+    const problemas = conferirPr({ pr, arquivos: await github("GET", `/repos/${repo}/pulls/${estado.pr}/files?per_page=100`), estado });
+    if (problemas.length) {
+      Object.assign(estado, { fase: "pendente_instrutor", erro: problemas.slice(0, 3).join("; ") });
+      await salvar();
+      log(`PR #${estado.pr} recusado na conferência: ${estado.erro}. O instrutor decide.`);
+      return saidas;
+    }
+    const buildDoCommitAtual = env.BUILD_SHA === pr.head.sha;
+    if (env.BUILD_RESULTADO !== "ok" || !buildDoCommitAtual) {
+      const erro = !buildDoCommitAtual ? "o build conferido não é do commit atual do PR" : `build/teste falhou: ${String(env.BUILD_ERRO ?? "").slice(0, 300) || "sem detalhe"}`;
+      if ((estado.correcoes ?? 0) < MAX_CORRECOES) {
+        // Uma rodada automática de correção no MESMO PR; o próximo run é disparado explicitamente.
+        Object.assign(estado, { fase: "corrigir", erro, correcoes: (estado.correcoes ?? 0) + 1 });
+        await salvar();
+        await github("POST", `/repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`, { ref: "main", inputs: { issue: String(numero), request_id: estado.requestId, retomar: "nao" } });
+        log(`PR #${estado.pr}: ${erro}. Pedida a correção (rodada ${estado.correcoes}).`);
+      } else {
+        Object.assign(estado, { fase: "pendente_instrutor", erro: `${erro} (depois da rodada de correção)` });
+        await salvar();
+        log(`PR #${estado.pr}: ${erro}. Pendência para o instrutor.`);
+      }
+      return saidas;
+    }
+    estado.build = { sha: pr.head.sha, resultado: "ok" };
+    if (env.AUTO_MERGE !== "true") {
+      Object.assign(estado, { fase: "aguardando_merge", erro: undefined });
+      await salvar();
+      log(`PR #${estado.pr} conferido (build verde em ${pr.head.sha.slice(0, 7)}); aguardando merge humano (AUTO_MERGE=false).`);
+      return saidas;
+    }
+    try {
+      // Merge do commit conferido (sha), pela API normal: respeita as regras da branch, sem bypass.
+      await github("PUT", `/repos/${repo}/pulls/${estado.pr}/merge`, { sha: pr.head.sha, merge_method: "squash", commit_title: `[ai] Pedido do app #${numero} (${estado.requestId})` });
+    } catch (e) {
+      Object.assign(estado, { fase: "aguardando_merge", erro: `merge não permitido agora: ${e.message}` });
+      await salvar();
+      log(estado.erro);
+      return saidas;
+    }
+    estado.fase = "integrado";
+    await salvar();
+    await entregarResposta(github, repo, numero, estado, mensagemIntegrado(estado.pr));
+    await salvar();
+    log(`Issue #${numero}: PR #${estado.pr} integrado, resposta publicada e issue fechada.`);
     return saidas;
   }
 

@@ -7,6 +7,9 @@ import { Menu } from "./componentes/Menu.jsx";
 // Enquanto a conversa está aberta, buscamos respostas novas dos agentes de tempos em tempos.
 const INTERVALO_ATUALIZACAO = 5000;
 
+// Etapas em que nada está acontecendo agora (sem animação no status).
+const ETAPAS_PARADAS = ["simulado", "resultado", "concluido", "encerrado", "pr_fechado", "pendente_instrutor", "aguardando_merge", "incerto", "erro_ia", "invalido", "erro_issue", "erro_disparo"];
+
 const SUGESTOES = [
   "Não consigo mover um cartão entre listas",
   "Como organizar melhor meus quadros?",
@@ -124,17 +127,22 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
   const [conversa, setConversa] = useState(null); // {ticket, messages}
   const [enviando, setEnviando] = useState(false);
   const [carregando, setCarregando] = useState(false);
+  const [sincronia, setSincronia] = useState({ em: null, buscando: false });
+  const atualizarAgora = useRef(null);
   const fim = useRef(null);
   const total = useRef(0);
 
-  // Carrega a conversa aberta e continua buscando respostas novas enquanto a aba está visível.
+  // Enquanto o chat está aberto, sincroniza com a issue do GitHub e traz cada mensagem do N1 assim que ela acontece.
   useEffect(() => {
     if (!ticketId) { setConversa(null); return; }
     let vivo = true;
     setCarregando(true);
-    const buscar = (primeira) =>
-      api.tickets.detalhe(ticketId)
+    setSincronia({ em: null, buscando: false });
+    const buscar = (primeira) => {
+      setSincronia((s) => ({ ...s, buscando: true }));
+      return api.tickets.sincronizar(ticketId)
         .then((dados) => {
+          if (vivo) setSincronia({ em: dados.sincronizadoEm ?? new Date().toISOString(), buscando: false });
           if (!vivo) return;
           setConversa((atual) => {
             const pendentes = atual?.ticket?.id === ticketId ? atual.messages.filter((m) => m.pendente) : [];
@@ -144,7 +152,13 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
           total.current = dados.messages.length;
         })
         .catch((e) => { if (vivo && primeira) aoErro?.(e.message); })
-        .finally(() => { if (vivo && primeira) setCarregando(false); });
+        .finally(() => {
+          if (!vivo) return;
+          setSincronia((s) => ({ ...s, buscando: false }));
+          if (primeira) setCarregando(false);
+        });
+    };
+    atualizarAgora.current = () => buscar(false);
     void buscar(true);
     const relogio = setInterval(() => { if (document.visibilityState === "visible") void buscar(false); }, INTERVALO_ATUALIZACAO);
     return () => { vivo = false; clearInterval(relogio); };
@@ -203,6 +217,7 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
   if (!ticketId) return <section className="chat" aria-label="Novo ticket"><NovoTicket key={novoTicket} aoAbrir={abrir} enviando={enviando} /></section>;
 
   const ticket = conversa?.ticket?.id === ticketId ? conversa.ticket : null;
+  const progresso = ticket ? conversa.progress ?? null : null;
   const mensagens = ticket ? conversa.messages : [];
   const fechado = ticket?.status === "closed";
 
@@ -218,6 +233,20 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
           ) : null}
         </div>
         {ticket ? (
+          <div className="chat-topo-acoes">
+          <span className="chat-sincronia" aria-live="polite">
+            {sincronia.buscando ? "Sincronizando…" : sincronia.em ? `Atualizado às ${new Date(sincronia.em).toLocaleTimeString("pt-BR")}` : ""}
+          </span>
+          <button
+            type="button"
+            className="botao botao-fantasma chat-atualizar"
+            onClick={() => atualizarAgora.current?.()}
+            disabled={sincronia.buscando}
+            aria-label="Atualizar mensagens"
+          >
+            <Icone nome="atualizar" tamanho={16} className={sincronia.buscando ? "girando" : ""} />
+            Atualizar
+          </button>
           <Menu
             rotulo="Ações do ticket"
             itens={[
@@ -228,6 +257,7 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
               { rotulo: "Excluir ticket", icone: "lixeira", perigo: true, aoClicar: () => aoExcluir(ticket) },
             ]}
           />
+          </div>
         ) : null}
       </header>
 
@@ -235,14 +265,13 @@ export function TelaAtendimento({ ticketId, novoTicket = 0, versao, aoAbrirTicke
         <div className="chat-mensagens" role="log" aria-live="polite" aria-busy={carregando}>
           {!ticket && carregando ? <p className="carregando-line" role="status">Carregando conversa…</p> : null}
           {mensagens.map((m) => <Mensagem key={m.id} mensagem={m} />)}
-          {ticket && aguardandoAgente(ticket, mensagens) ? (
-            <div className="msg msg-agente msg-espera" role="status">
-              <span className="msg-avatar" aria-hidden="true"><Icone nome="agente" tamanho={18} /></span>
-              <div className="msg-corpo">
-                <span className="digitando" aria-hidden="true"><i /><i /><i /></span>
-                <p className="msg-espera-texto">Seu ticket está na fila. Um agente vai responder nesta conversa.</p>
-              </div>
-            </div>
+          {ticket && !fechado && (progresso || aguardandoAgente(ticket, mensagens)) ? (
+            // Status do atendimento (vem da issue): linha neutra, sem avatar, para não parecer fala de um agente.
+            <p className="chat-status-linha" role="status" data-ativo={progresso && !ETAPAS_PARADAS.includes(progresso.phase) ? "" : undefined}>
+              <span className="chat-status-ponto" aria-hidden="true" />
+              <span>{progresso ? progresso.label : "Aguardando um atendente"}</span>
+              {progresso?.updatedAt ? <span className="chat-status-hora">{horaDaMensagem(progresso.updatedAt)}</span> : null}
+            </p>
           ) : null}
           {fechado ? (
             <p className="chat-aviso-fechado"><Icone nome="check" tamanho={16} /> Ticket resolvido. Escreva abaixo se precisar reabrir.</p>

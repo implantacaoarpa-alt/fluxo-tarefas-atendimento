@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { invalido, naoEncontrado, texto } from "./http.js";
 import { transacao } from "./db.js";
 import { usuarioDaSessao } from "./auth.js";
+import { ROTULOS_FASE } from "./integracao-github.js";
 
 const ROLES = ["user", "agent"];
 const STATUS = ["open", "closed"];
@@ -40,6 +41,11 @@ export function rotasDeTickets(app, db, integracao = null) {
     const t = db.prepare("SELECT * FROM ticket WHERE id = ? AND (owner_id = ? OR owner_id IS NULL)").get(id, donoId);
     if (!t) throw naoEncontrado("Ticket");
     return t;
+  };
+  /** Status do atendimento vindo da issue (fase sincronizada), mostrado como linha neutra no chat. */
+  const progresso = (ticketId) => {
+    const g = db.prepare("SELECT fase, atualizado_em FROM ticket_github WHERE ticket_id = ?").get(ticketId);
+    return g ? { phase: g.fase, label: ROTULOS_FASE[g.fase] ?? g.fase, updatedAt: g.atualizado_em } : null;
   };
   const mensagens = (ticketId) =>
     db.prepare("SELECT * FROM ticket_message WHERE ticket_id = ? ORDER BY criado_em, rowid").all(ticketId).map(saidaMensagem);
@@ -88,12 +94,21 @@ export function rotasDeTickets(app, db, integracao = null) {
       return novo;
     });
     integracao?.aoAbrirTicket({ id, title, content }).catch((e) => console.error(`[atendimento] integração falhou: ${e.message}`));
-    return { ticket: saidaTicket(buscarTicket(id, donoId)), messages: mensagens(id) };
+    return { ticket: saidaTicket(buscarTicket(id, donoId)), messages: mensagens(id), progress: progresso(id) };
   });
 
   app.get("/api/tickets/:id", (ctx) => {
     const t = buscarTicket(ctx.params.id, dono(ctx));
-    return { ticket: saidaTicket(t), messages: mensagens(t.id) };
+    return { ticket: saidaTicket(t), messages: mensagens(t.id), progress: progresso(t.id) };
+  });
+
+  // Chat aberto ou botão "Atualizar": consulta a issue agora (com limite de frequência) e devolve a conversa.
+  app.post("/api/tickets/:id/sincronizar", async (ctx) => {
+    const donoId = dono(ctx);
+    buscarTicket(ctx.params.id, donoId);
+    const { sincronizadoEm } = (await integracao?.sincronizarTicket(ctx.params.id)) ?? { sincronizadoEm: null };
+    const t = buscarTicket(ctx.params.id, donoId);
+    return { ticket: saidaTicket(t), messages: mensagens(t.id), progress: progresso(t.id), sincronizadoEm };
   });
 
   app.patch("/api/tickets/:id", (ctx) => {

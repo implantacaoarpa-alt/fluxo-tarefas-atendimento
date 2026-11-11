@@ -58,6 +58,7 @@ Mantenha o `requestId` e o `resultPath` recebidos nas instruções do controlado
 2. Ao terminar com código:
    - rode `npm run build`;
    - confira o comportamento uma vez;
-   - abra o PR com `Fixes #<issue>` e o `requestId` na descrição.
+   - abra o PR com `Refs #<issue>` (nunca `Fixes`/`Closes`: a issue só fecha depois da resposta ao cliente) e o `requestId` na descrição.
    Build e uma conferência bastam; não crie infraestrutura de testes.
-3. Entregue o PR e o relatório. Não faça merge nem feche a issue.
+3. Entregue o PR e o relatório. Não faça merge nem feche a issue: o controlador aguarda o build verde do commit atual, integra só com `AUTO_MERGE=true` e então publica a resposta do N1 e fecha a issue.
+4. Se o controlador pedir correção (erro curto + `requestId`), corrija no **mesmo PR**, uma única vez. Não abra outro PR nem recomece o trabalho.

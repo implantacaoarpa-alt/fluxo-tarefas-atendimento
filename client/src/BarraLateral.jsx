@@ -5,7 +5,9 @@ import { Icone } from "./componentes/Icone.jsx";
 const SECOES = [
   { id: "quadros", rotulo: "Quadros", icone: "colunas" },
   { id: "atendimento", rotulo: "Atendimento", icone: "conversa" },
+  { id: "painel", rotulo: "Painel", icone: "painel" },
 ];
+const CAMINHOS = { quadros: "/quadro", atendimento: "/atendimento", painel: "/painel" };
 
 /** Lista de quadros com o atalho para criar um novo. */
 function ListaQuadros({ quadros, quadroId, aoSelecionar, aoNovoQuadro, aoRenomear, aoExcluir }) {
@@ -98,7 +100,7 @@ function ListaTickets({ tickets, ticketId, aoSelecionar, aoNovo, aoRenomear, aoE
 /** Lateral: marca, menu de seções e o conteúdo da seção aberta (quadros ou tickets). */
 export function BarraLateral({ secao = "quadros", aoNavegar, atendimento, ...quadros }) {
   return (
-    <aside className="lateral" aria-label={secao === "atendimento" ? "Atendimento" : "Quadros"}>
+    <aside className="lateral" aria-label={{ atendimento: "Atendimento", painel: "Painel" }[secao] ?? "Quadros"}>
       <a className="marca" href="/" aria-label="Fluxo, voltar ao início" style={{ textDecoration: "none" }}>
         <span className="marca-simbolo" aria-hidden="true">
           <Icone nome="colunas" tamanho={18} />
@@ -111,7 +113,7 @@ export function BarraLateral({ secao = "quadros", aoNavegar, atendimento, ...qua
           {SECOES.map((s) => (
             <a
               key={s.id}
-              href={s.id === "atendimento" ? "/atendimento" : "/quadro"}
+              href={CAMINHOS[s.id]}
               className="lateral-nav-item"
               aria-current={secao === s.id ? "page" : undefined}
               onClick={(e) => { e.preventDefault(); aoNavegar(s.id); }}
@@ -123,7 +125,9 @@ export function BarraLateral({ secao = "quadros", aoNavegar, atendimento, ...qua
         </nav>
       ) : null}
 
-      {secao === "atendimento" && atendimento ? <ListaTickets {...atendimento} /> : <ListaQuadros {...quadros} />}
+      {secao === "painel" ? (
+        <p className="lateral-vazio">Todos os tickets de atendimento, de todos os clientes, em modo leitura.</p>
+      ) : secao === "atendimento" && atendimento ? <ListaTickets {...atendimento} /> : <ListaQuadros {...quadros} />}
     </aside>
   );
 }

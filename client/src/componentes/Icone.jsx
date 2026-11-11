@@ -102,6 +102,21 @@ const DESENHOS = {
     </>
   ),
   check: <path d="M20 6 9 17l-5-5" />,
+  painel: (
+    <>
+      <rect x="3" y="3" width="7" height="9" rx="1.5" />
+      <rect x="14" y="3" width="7" height="5" rx="1.5" />
+      <rect x="14" y="12" width="7" height="9" rx="1.5" />
+      <rect x="3" y="16" width="7" height="5" rx="1.5" />
+    </>
+  ),
+  externo: (
+    <>
+      <path d="M14 4h6v6" />
+      <path d="M20 4 11 13" />
+      <path d="M19 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4" />
+    </>
+  ),
   agente: (
     <>
       <rect x="4" y="8" width="16" height="12" rx="3" />

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "./api.js";
 import { BarraLateral } from "./BarraLateral.jsx";
 import { TelaAtendimento } from "./TelaAtendimento.jsx";
+import { TelaPainel } from "./TelaPainel.jsx";
 import { TelaQuadro } from "./TelaQuadro.jsx";
 import { Botao } from "./componentes/Botao.jsx";
 import { Campo } from "./componentes/Campo.jsx";
@@ -41,6 +42,7 @@ function EstadoVazio({ titulo, descricao, children }) {
 function lerRota() {
   const partes = window.location.pathname.split("/").filter(Boolean);
   if (partes[0] === "atendimento") return { secao: "atendimento", ticketId: partes[1] ? decodeURIComponent(partes[1]) : null };
+  if (partes[0] === "painel") return { secao: "painel", ticketId: partes[1] ? decodeURIComponent(partes[1]) : null };
   return { secao: "quadros", ticketId: null };
 }
 
@@ -108,7 +110,7 @@ export function App() {
   }, []);
 
   const navegar = (secao, ticketId = null) => {
-    const caminho = secao === "atendimento" ? (ticketId ? `/atendimento/${encodeURIComponent(ticketId)}` : "/atendimento") : "/quadro";
+    const caminho = secao === "quadros" ? "/quadro" : ticketId ? `/${secao}/${encodeURIComponent(ticketId)}` : `/${secao}`;
     if (window.location.pathname !== caminho) window.history.pushState(null, "", caminho);
     setRota({ secao, ticketId });
     setErro(null);
@@ -269,6 +271,9 @@ export function App() {
   };
 
   const conteudo = () => {
+    if (rota.secao === "painel") {
+      return <TelaPainel ticketId={rota.ticketId} aoAbrir={(id) => navegar("painel", id)} />;
+    }
     if (rota.secao === "atendimento") {
       return (
         <TelaAtendimento

@@ -42,10 +42,15 @@ export const api = {
     excluir: (id) => pedir("DELETE", `/cards/${id}`),
     mover: (id, listId, position) => pedir("PATCH", `/cards/${id}`, corpo({ listId, position })),
   },
+  painel: {
+    listar: () => pedir("GET", "/painel/tickets"),
+    detalhe: (id) => pedir("GET", `/painel/tickets/${id}`),
+  },
   tickets: {
     listar: () => pedir("GET", "/tickets"),
     abrir: (content) => pedir("POST", "/tickets", { content }),
     detalhe: (id) => pedir("GET", `/tickets/${id}`),
+    sincronizar: (id) => pedir("POST", `/tickets/${id}/sincronizar`),
     editar: (id, mudanca) => pedir("PATCH", `/tickets/${id}`, corpo(mudanca)),
     excluir: (id) => pedir("DELETE", `/tickets/${id}`),
     responder: (id, content) => pedir("POST", `/tickets/${id}/messages`, { content }),

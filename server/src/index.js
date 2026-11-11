@@ -15,4 +15,4 @@ servidor.listen(porta, "127.0.0.1", () => {
 });
 
 // Acompanha as issues dos tickets e avisa o cliente no app (não faz nada em dry-run).
-setInterval(() => void integracao.sincronizar(), 60_000).unref();
+setInterval(() => void integracao.sincronizar(), 30_000).unref();

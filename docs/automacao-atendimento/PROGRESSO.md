@@ -57,3 +57,19 @@
   - habilitar "Allow GitHub Actions to create and approve pull requests";
   - `.env` local com `AGENT_RUNTIME=github-actions` e `GITHUB_REPO`;
   - enviar os arquivos para a `main`.
+
+## Etapas 04 e 05: validação, entrega e retomadas (2026-11-11)
+
+- **Verificação mínima:** `ci.yml` roda `npm ci`, `npm run build` e `npm test` em push para a `main` e em PRs. A `main` não tem proteção nem rulesets, então não havia exigência antiga a ajustar. PRs da automação são conferidos pelo job `verificar-pr`, porque PRs abertos com GITHUB_TOKEN não disparam o `ci.yml`.
+- **Aceite de código:** o critério é só `{id, description}`. O controlador aceita a mudança conferindo a origem do PR, o requestId, os caminhos permitidos e o build verde do commit atual (`verificar-pr`, sem segredos). O Desenvolvedor registra a conferência e o Revisor dá o parecer em uma frase, cada um num update.
+- **Entrega:** com `AUTO_MERGE=false` (valor atual), o PR fica disponível. O merge humano dispara a resposta do N1 na issue (ID estável `fluxo-entrega <requestId>`) e o fechamento da issue. Com `AUTO_MERGE=true`, o controlador integra o commit conferido pela API normal, sem bypass.
+- **Verificado com transporte simulado:** os cenários A–D de `conferir-entrega` passaram; `npm test` 26 ok; `npm run build` ok.
+
+**Caminho de retomada.** Cada execução relê o comentário de controle da issue antes de agir, e a fase gravada diz o que falta:
+- `chamando` vira `incerto` e só volta com `workflow_dispatch` e `retomar=sim`, sem nova chamada às cegas.
+- `proposta` reabre só o PR, com o artifact da execução registrada.
+- `pr_aberto` e `aguardando_merge` reconferem o build do commit atual e a entrega, sem chamar a IA.
+- Build ou conferência vermelha vira `corrigir`, com o erro curto e o requestId, e dispara um novo run que pede uma única correção no MESMO PR. Uma segunda falha vira `pendente_instrutor` e a decisão fica com o instrutor; não se cria outro ticket nem se recomeça o trabalho.
+- `integrado` (merge feito, mas a resposta falhou) retoma só a resposta e o fechamento.
+- `concluido`, `resultado`, `simulado` e `pr_fechado` não repetem nada.
+- Para retomar à mão: Actions → ai-agents → Run workflow, com o número da issue e o requestId.

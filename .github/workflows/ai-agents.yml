@@ -5,7 +5,8 @@
 # - controlador e instruções vêm sempre da main; nunca há checkout do código de um PR;
 # - AI_API_KEY só existe no passo "Chamar IA", que não recebe GITHUB_TOKEN;
 # - o build da proposta roda num job sem segredos e só com leitura;
-# - nada de merge, deploy ou fechamento automático da issue.
+# - o build do commit atual do PR roda em job sem segredos (verificar-pr);
+# - merge só com a variável AUTO_MERGE=true, pela API normal (respeita as regras da branch); nada de deploy.
 name: ai-agents
 
 on:
@@ -49,6 +50,10 @@ jobs:
       proposta: ${{ steps.registrar.outputs.proposta || steps.preparar.outputs.proposta }}
       artefato_run: ${{ steps.registrar.outputs.artefato_run || steps.preparar.outputs.artefato_run }}
       request_id: ${{ steps.preparar.outputs.request_id }}
+      issue: ${{ steps.preparar.outputs.issue }}
+      branch: ${{ steps.preparar.outputs.branch }}
+      base_ref: ${{ steps.preparar.outputs.base_ref }}
+      verificar: ${{ steps.preparar.outputs.verificar }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.coordenar.outputs.base_ref || 'main' }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -145,4 +150,70 @@ jobs:
       - name: Abrir PR (sem merge)
         run: node automacao/ai-controlador.mjs abrir-pr
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # Build e testes do commit ATUAL do PR. Roda código do candidato: sem segredos e só leitura.
+  verificar-pr:
+    needs: [coordenar, abrir-pr]
+    if: >-
+      always() && vars.AGENT_DRY_RUN == 'false' &&
+      (needs.abrir-pr.result == 'success' || needs.coordenar.outputs.verificar == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      resultado: ${{ steps.build.outputs.resultado }}
+      sha: ${{ steps.build.outputs.sha }}
+      erro: ${{ steps.build.outputs.erro }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.coordenar.outputs.branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm ci + build + testes do commit atual
+        id: build
+        shell: bash
+        run: |
+          set +e
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          { npm ci && npm run build && npm test; } > build.log 2>&1
+          if [ $? -eq 0 ]; then
+            echo "resultado=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "resultado=falhou" >> "$GITHUB_OUTPUT"
+            echo "erro=$(grep -iE 'error|erro|fail|✖' build.log | tail -3 | tr -d '\r' | tr '\n' ' ' | cut -c1-300)" >> "$GITHUB_OUTPUT"
+          fi
+          tail -n 40 build.log
+
+  # Conferência (origem, requestId, caminhos, build do commit atual), merge opcional, resposta do N1 e fechamento.
+  entregar:
+    needs: [coordenar, verificar-pr]
+    if: always() && vars.AGENT_DRY_RUN == 'false' && needs.verificar-pr.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Entregar
+        run: node automacao/ai-controlador.mjs entregar
+        env:
+          ISSUE_NUMBER: ${{ needs.coordenar.outputs.issue }}
+          BUILD_RESULTADO: ${{ needs.verificar-pr.outputs.resultado }}
+          BUILD_SHA: ${{ needs.verificar-pr.outputs.sha }}
+          BUILD_ERRO: ${{ needs.verificar-pr.outputs.erro }}
+          AUTO_MERGE: ${{ vars.AUTO_MERGE || 'false' }}
           GITHUB_TOKEN: ${{ github.token }}

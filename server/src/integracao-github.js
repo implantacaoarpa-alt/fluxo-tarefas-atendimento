@@ -8,17 +8,37 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 
-const AUTOR_N1 = "Atendimento N1";
+const AUTOR_N1 = "Agente N1";
+const AUTOR_AUTOMATICO = "Fluxo · atualização automática";
 const RUNTIMES = ["github-native", "github-actions"];
 const WORKFLOW_IA = "ai-agents.yml";
 const FINAIS = ["concluido", "pr_fechado", "encerrado", "resultado", "simulado"];
 const MARCAS = { "github-native": /<!-- fluxo-estado (\{.*\}) -->/, "github-actions": /<!-- fluxo-ai-estado (\{.*\}) -->/ };
 
-const MENSAGENS_N1 = {
-  recebido: (issue) => `Recebemos seu pedido${issue ? ` (#${issue})` : ""}. Nossa equipe vai analisar e responder por aqui.`,
-  pr_aberto: () => "Já existe uma proposta de ajuste em revisão para o seu pedido.",
-  concluido: () => "Seu pedido foi concluído. Se algo não ficou como esperado, é só responder aqui.",
+
+// Status do atendimento por etapa da issue. Aparece como linha de status no chat, NUNCA como mensagem de agente.
+export const ROTULOS_FASE = {
+  recebido: "Pedido registrado; aguardando um agente",
+  dry_run: "Pedido registrado (ensaio local)",
+  chamando: "Um agente está analisando seu pedido",
+  proposta: "Ajuste preparado; em validação",
+  pr_aberto: "Ajuste em revisão",
+  corrigir: "Ajuste em correção",
+  aguardando_merge: "Ajuste aprovado nas verificações; aguardando a equipe",
+  pendente_instrutor: "Com a equipe para análise",
+  integrado: "Ajuste integrado",
+  concluido: "Concluído",
+  simulado: "Ensaio concluído (simulação)",
+  resultado: "Respondido",
+  pr_fechado: "Ajuste não seguiu adiante",
+  encerrado: "Encerrado",
+  incerto: "Imprevisto no atendimento; a equipe vai verificar",
+  erro_ia: "Imprevisto no atendimento; a equipe vai verificar",
+  invalido: "Imprevisto no atendimento; a equipe vai verificar",
+  erro_issue: "Imprevisto ao registrar o pedido; a equipe vai verificar",
+  erro_disparo: "Imprevisto ao registrar o pedido; a equipe vai verificar",
 };
+const INTERVALO_TICKET = 8_000;
 
 const GH_PADRAO = "C:/Program Files/GitHub CLI/gh.exe";
 
@@ -78,12 +98,12 @@ export function criarIntegracao(db, config = configDaIntegracao(), { github = cl
   };
 
   /** Mensagem do N1 no app, uma única vez por chave (o ID enviado fica guardado). */
-  const enviarN1 = (ticketId, chave, texto) => {
+  const enviarN1 = (ticketId, chave, texto, autor = AUTOR_N1) => {
     const enviadas = JSON.parse(estado(ticketId).mensagens_enviadas);
     if (!texto || enviadas.some((m) => m.chave === chave)) return;
     const id = randomUUID();
     const agora = new Date().toISOString();
-    db.prepare("INSERT INTO ticket_message (id, ticket_id, role, author, content, criado_em) VALUES (?, ?, 'agent', ?, ?, ?)").run(id, ticketId, AUTOR_N1, texto, agora);
+    db.prepare("INSERT INTO ticket_message (id, ticket_id, role, author, content, criado_em) VALUES (?, ?, 'agent', ?, ?, ?)").run(id, ticketId, autor, texto, agora);
     db.prepare("UPDATE ticket SET atualizado_em = ? WHERE id = ?").run(agora, ticketId);
     gravar(ticketId, { mensagens_enviadas: JSON.stringify([...enviadas, { chave, id }]) });
   };
@@ -113,7 +133,6 @@ export function criarIntegracao(db, config = configDaIntegracao(), { github = cl
         gravar(id, { fase: numero ? "erro_disparo" : "erro_issue" });
       }
     }
-    enviarN1(id, "recebido", MENSAGENS_N1.recebido(numero));
   };
 
   /** Consulta simples ao GitHub: lê o comentário de controle da issue e traz o resultado validado ao app. */
@@ -122,29 +141,47 @@ export function criarIntegracao(db, config = configDaIntegracao(), { github = cl
     await reconciliar();
   };
 
+  /** Lê o comentário de controle de UMA issue e repassa ao cliente cada etapa nova, na ordem em que aconteceu. */
+  const reconciliarLinha = async (t) => {
+    const comentarios = await github("GET", `/repos/${config.repo}/issues/${t.issue_number}/comments?per_page=100`);
+    const marca = MARCAS[t.runtime];
+    const doBot = comentarios.find((c) => c.user?.login === "github-actions[bot]" && marca.test(c.body));
+    if (!doBot) return;
+    const lido = JSON.parse(marca.exec(doBot.body)[1]);
+    gravar(t.ticket_id, { fase: lido.fase, pr_number: lido.pr ?? null, ...(lido.runId ? { run_id: lido.runId } : {}) });
+    if (t.runtime !== "github-actions") return; // o andamento aparece como status, não como mensagem
+
+    // Só textos validados (updates da IA) ou frases fixas do N1 por etapa; cada um com chave estável, sem repetir.
+    const updates = lido.updates ?? [];
+    const enviarResultado = () => { for (const u of updates.filter((x) => x.id !== "entrega")) enviarN1(t.ticket_id, `upd:${u.id}`, u.publicText); };
+    for (const fase of lido.marcos ?? [lido.fase]) {
+      if (["simulado", "proposta", "resultado"].includes(fase)) enviarResultado();
+      if (["simulado", "resultado", "pr_aberto"].includes(fase)) enviarN1(t.ticket_id, "final", lido.publicText);
+    }
+    if (["aguardando_merge", "integrado", "concluido"].includes(lido.fase)) { enviarResultado(); enviarN1(t.ticket_id, "final", lido.publicText); }
+    // Aviso de entrega é texto fixo do controlador: identificado como automático, não como agente.
+    for (const u of updates.filter((x) => x.id === "entrega")) enviarN1(t.ticket_id, `upd:${u.id}`, u.publicText, AUTOR_AUTOMATICO);
+  };
+
   const reconciliar = async () => {
     const abertos = db.prepare(`SELECT * FROM ticket_github WHERE issue_number IS NOT NULL AND fase NOT IN (${FINAIS.map(() => "?").join(",")})`).all(...FINAIS);
     for (const t of abertos) {
-      try {
-        const comentarios = await github("GET", `/repos/${config.repo}/issues/${t.issue_number}/comments?per_page=100`);
-        const marca = MARCAS[t.runtime];
-        const doBot = comentarios.find((c) => c.user?.login === "github-actions[bot]" && marca.test(c.body));
-        if (!doBot) continue;
-        const lido = JSON.parse(marca.exec(doBot.body)[1]);
-        gravar(t.ticket_id, { fase: lido.fase, pr_number: lido.pr ?? null, ...(lido.runId ? { run_id: lido.runId } : {}) });
-        if (t.runtime === "github-actions") {
-          // Só textos que o controlador já validou: updates com id estável e o texto final do N1.
-          for (const u of lido.updates ?? []) enviarN1(t.ticket_id, `upd:${u.id}`, u.publicText);
-          if (["resultado", "simulado", "pr_aberto", "concluido"].includes(lido.fase)) enviarN1(t.ticket_id, "final", lido.publicText);
-        } else {
-          if (lido.fase === "pr_aberto") enviarN1(t.ticket_id, "pr_aberto", MENSAGENS_N1.pr_aberto());
-          if (lido.fase === "concluido") enviarN1(t.ticket_id, "concluido", MENSAGENS_N1.concluido());
-        }
-      } catch (e) {
-        log(`[${t.runtime}] reconciliação da issue #${t.issue_number} falhou: ${e.message}`);
-      }
+      try { await reconciliarLinha(t); } catch (e) { log(`[${t.runtime}] reconciliação da issue #${t.issue_number} falhou: ${e.message}`); }
     }
   };
 
-  return { config, aoAbrirTicket, sincronizar, reconciliar };
+  /** Sincroniza um ticket sob demanda (chat aberto ou botão Atualizar), no máximo uma consulta a cada INTERVALO_TICKET. */
+  const ultimaConsulta = new Map();
+  const sincronizarTicket = async (ticketId) => {
+    const t = estado(ticketId);
+    if (!config.ativo || config.dryRun || !t?.issue_number || FINAIS.includes(t.fase)) return { sincronizadoEm: null };
+    const agora = Date.now();
+    if (agora - (ultimaConsulta.get(ticketId) ?? 0) >= INTERVALO_TICKET) {
+      ultimaConsulta.set(ticketId, agora);
+      try { await reconciliarLinha(t); } catch (e) { log(`[${t.runtime}] sincronização da issue #${t.issue_number} falhou: ${e.message}`); }
+    }
+    return { sincronizadoEm: new Date(ultimaConsulta.get(ticketId)).toISOString() };
+  };
+
+  return { config, aoAbrirTicket, sincronizar, reconciliar, sincronizarTicket };
 }
