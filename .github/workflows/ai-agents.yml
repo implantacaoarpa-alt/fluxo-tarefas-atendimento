@@ -1,0 +1,148 @@
+# Runtime github-actions: ticket do app -> issue origin:app (criada pelo backend) -> coordenador com a IA própria.
+# Liga com a variável do repositório AGENT_RUNTIME=github-actions. AGENT_DRY_RUN fica true até o ensaio
+# (sem a variável, vale true: a IA é simulada com dados fictícios e nenhum PR é aberto).
+# Segurança:
+# - controlador e instruções vêm sempre da main; nunca há checkout do código de um PR;
+# - AI_API_KEY só existe no passo "Chamar IA", que não recebe GITHUB_TOKEN;
+# - o build da proposta roda num job sem segredos e só com leitura;
+# - nada de merge, deploy ou fechamento automático da issue.
+name: ai-agents
+
+on:
+  # Início explícito pelo backend logo após criar a issue, e retomada manual.
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Número da issue origin:app
+        required: true
+      request_id:
+        description: requestId gravado pelo backend no corpo da issue
+        required: true
+      retomar:
+        description: "sim = permite nova chamada à IA depois de erro ou incerteza já conferidos"
+        required: false
+        default: "nao"
+  issues:
+    types: [opened, closed]
+  pull_request_target:
+    types: [closed]
+
+permissions: {}
+
+# Uma execução por vez para a mesma issue (o PR usa a branch ai/issue-<n>).
+concurrency:
+  group: ai-agents-${{ github.event.pull_request.head.ref || format('ai/issue-{0}', inputs.issue || github.event.issue.number) }}
+  cancel-in-progress: false
+
+jobs:
+  coordenar:
+    if: >-
+      vars.AGENT_RUNTIME == 'github-actions' &&
+      (github.event_name != 'issues' || contains(github.event.issue.labels.*.name, 'origin:app')) &&
+      (github.event_name != 'pull_request_target' || startsWith(github.event.pull_request.head.ref, 'ai/issue-'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      proposta: ${{ steps.registrar.outputs.proposta || steps.preparar.outputs.proposta }}
+      artefato_run: ${{ steps.registrar.outputs.artefato_run || steps.preparar.outputs.artefato_run }}
+      request_id: ${{ steps.preparar.outputs.request_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Preparar (origem, estado e entrada do coordenador)
+        id: preparar
+        run: node automacao/ai-controlador.mjs preparar
+        env:
+          AGENT_RUNTIME: ${{ vars.AGENT_RUNTIME }}
+          APP_ISSUE_AUTHOR: ${{ vars.APP_ISSUE_AUTHOR }}
+          AI_MAX_CALLS: ${{ vars.AI_MAX_CALLS || '1' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Chamar IA (única etapa com AI_API_KEY)
+        if: steps.preparar.outputs.chamar == 'true'
+        timeout-minutes: 3
+        run: node automacao/ai-controlador.mjs chamar
+        env:
+          AGENT_DRY_RUN: ${{ vars.AGENT_DRY_RUN || 'true' }}
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_TIMEOUT_MS: ${{ vars.AI_TIMEOUT_MS || '120000' }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      - name: Registrar (validação fora do modelo e estado na issue)
+        id: registrar
+        if: always() && steps.preparar.outputs.chamar == 'true'
+        run: node automacao/ai-controlador.mjs registrar
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Guardar relatório e proposta
+        if: steps.registrar.outputs.proposta == 'true' || steps.registrar.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-resultado-${{ steps.preparar.outputs.request_id }}
+          path: ai-trabalho/
+          if-no-files-found: ignore
+
+  validar-build:
+    needs: coordenar
+    if: needs.coordenar.outputs.proposta == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-resultado-${{ needs.coordenar.outputs.request_id }}
+          path: ai-trabalho
+          run-id: ${{ needs.coordenar.outputs.artefato_run }}
+          github-token: ${{ github.token }}
+      # Daqui para baixo roda código proposto: sem segredos e sem token nas variáveis.
+      - name: Aplicar edições validadas
+        run: node automacao/ai-controlador.mjs aplicar
+      - run: npm ci
+      - run: npm run build
+
+  abrir-pr:
+    needs: [coordenar, validar-build]
+    if: needs.coordenar.outputs.proposta == 'true' && vars.AGENT_DRY_RUN == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-resultado-${{ needs.coordenar.outputs.request_id }}
+          path: ai-trabalho
+          run-id: ${{ needs.coordenar.outputs.artefato_run }}
+          github-token: ${{ github.token }}
+      - name: Abrir PR (sem merge)
+        run: node automacao/ai-controlador.mjs abrir-pr
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

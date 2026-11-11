@@ -1,0 +1,21 @@
+{
+  "produto": "Fluxo",
+  "descricao": "Quadro de tarefas (quadros, listas e cartões) com área de atendimento por tickets.",
+  "fonte": "App atual e docs/automacao-atendimento/PRODUTO.md",
+  "recursos": [
+    "Criar, renomear e excluir quadros",
+    "Criar, renomear e excluir listas",
+    "Criar, editar (título e descrição), excluir e mover cartões, arrastando ou pelo menu",
+    "Abrir tickets de suporte e conversar por mensagens",
+    "Marcar ticket como resolvido ou reabrir"
+  ],
+  "nao_disponivel": [
+    "Login na interface e contas separadas por usuário",
+    "Convite de equipe e permissões",
+    "Anexos, etiquetas, datas de entrega e notificações"
+  ],
+  "precos": null,
+  "planos": null,
+  "prazos": null,
+  "regra": "Campos null não estão definidos. Não invente: diga que a informação não está disponível ou faça uma pergunta curta."
+}

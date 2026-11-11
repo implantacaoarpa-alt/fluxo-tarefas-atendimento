@@ -7,3 +7,6 @@ server/dados
 .env.*
 !.env.example
 *.log
+
+# Arquivos temporários do workflow ai-agents
+ai-trabalho/

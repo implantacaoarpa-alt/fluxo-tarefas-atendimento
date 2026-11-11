@@ -83,6 +83,23 @@ const MIGRACOES = [
      ('msg-boas-vindas-2', 'ticket-boas-vindas', 'agent', 'Assistente Fluxo', 'Olá! Por enquanto os quadros são compartilhados por todos que usam o Fluxo, então sua equipe já enxerga o que você cria.
 
 Se precisar de algo mais, é só escrever aqui neste ticket.', '2026-11-10T13:02:00.000Z');`,
+  // Dono do ticket (usuário logado ou cliente anônimo por cookie) e o estado mínimo da ponte com o GitHub.
+  // Tickets antigos ficam sem dono (NULL) e continuam como estavam.
+  `ALTER TABLE ticket ADD COLUMN owner_id TEXT;
+   CREATE TABLE ticket_github (
+     ticket_id TEXT PRIMARY KEY REFERENCES ticket(id) ON DELETE CASCADE,
+     request_id TEXT NOT NULL UNIQUE,
+     issue_number INTEGER,
+     pr_number INTEGER,
+     fase TEXT NOT NULL,
+     mensagens_enviadas TEXT NOT NULL DEFAULT '[]',
+     atualizado_em TEXT NOT NULL
+   )`,
+  // Runtime de cada caso (casos github-native em andamento continuam no runtime deles),
+  // a execução do workflow e o caminho do relatório.
+  `ALTER TABLE ticket_github ADD COLUMN runtime TEXT NOT NULL DEFAULT 'github-native';
+   ALTER TABLE ticket_github ADD COLUMN run_id INTEGER;
+   ALTER TABLE ticket_github ADD COLUMN result_path TEXT`,
 ];
 
 /** `caminho` = arquivo do banco; `:memory:` nos testes. */

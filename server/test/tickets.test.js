@@ -4,8 +4,11 @@ import { criarApp } from "../src/app.js";
 import { tituloDaMensagem } from "../src/tickets.js";
 
 let base, servidor;
+// Guarda o cookie do cliente como o navegador faz: os tickets agora pertencem a quem abriu.
+let cookie = "";
 const chamar = async (metodo, caminho, corpo) => {
-  const r = await fetch(base + caminho, { method: metodo, headers: { "content-type": "application/json" }, body: corpo === undefined ? undefined : JSON.stringify(corpo) });
+  const r = await fetch(base + caminho, { method: metodo, headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: corpo === undefined ? undefined : JSON.stringify(corpo) });
+  cookie = r.headers.get("set-cookie")?.split(";")[0] ?? cookie;
   return { status: r.status, dados: r.status === 204 ? null : await r.json() };
 };
 
