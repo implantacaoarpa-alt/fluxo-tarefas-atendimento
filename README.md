@@ -65,6 +65,24 @@ JSON puro, sem login obrigatório. A interface fala com a API pelo proxy
 | PATCH | `/api/cards/:id` | `{card}` |
 | DELETE | `/api/cards/:id` | `{ok:true}` |
 
+### Atendimento (tickets)
+
+Tela em `/atendimento` (e `/atendimento/:id`). Cada ticket é uma conversa.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/tickets` | `{tickets:[{id,title,status,createdAt,updatedAt,lastMessage}]}` (mais recente primeiro) |
+| POST | `/api/tickets` `{content, title?}` | `{ticket, messages}` (abre o ticket com a 1ª mensagem; título sai dela) |
+| GET | `/api/tickets/:id` | `{ticket, messages:[{id,role,author,content,createdAt}]}` |
+| PATCH | `/api/tickets/:id` `{title?, status?}` | `{ticket}` (`status`: `open` ou `closed`) |
+| DELETE | `/api/tickets/:id` | `{ok:true}` |
+| POST | `/api/tickets/:id/messages` `{content, role?, author?}` | `{message, ticket}` |
+
+`role` é `user` (padrão) ou `agent`. Um agente responde com
+`POST /api/tickets/:id/messages {"role":"agent","author":"Nome do agente","content":"..."}`.
+Ticket aberto cuja última mensagem é do usuário está esperando resposta; a tela
+consulta a conversa a cada 5 s, então a resposta do agente aparece sozinha.
+
 IDs são strings, `position` é número e erros voltam como `{error:"mensagem"}`
 com o status adequado. Excluir um quadro apaga listas e cartões em cascata;
 mover um cartão reordena as duas listas na mesma transação.

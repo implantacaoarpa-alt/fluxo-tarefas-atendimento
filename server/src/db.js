@@ -58,6 +58,31 @@ const MIGRACOES = [
      ('card-api', 'list-fazendo', 'Montar a API de quadros', 'Boards, listas e cartões com movimentação entre listas.', 0),
      ('card-paleta', 'list-pronto', 'Escolher a paleta de cores', '', 0),
      ('card-metricas', 'list-backlog', 'Medir tempo por cartão', '', 0);`,
+  // Atendimento: cada ticket é uma conversa. `role` diz quem escreveu: o usuário ou um agente
+  // (os agentes autônomos vão responder pela mesma rota de mensagens, com role = 'agent').
+  `CREATE TABLE ticket (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+     criado_em TEXT NOT NULL,
+     atualizado_em TEXT NOT NULL
+   );
+   CREATE TABLE ticket_message (
+     id TEXT PRIMARY KEY,
+     ticket_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+     role TEXT NOT NULL CHECK (role IN ('user', 'agent')),
+     author TEXT NOT NULL DEFAULT '',
+     content TEXT NOT NULL,
+     criado_em TEXT NOT NULL
+   );
+   CREATE INDEX ticket_message_por_ticket ON ticket_message (ticket_id, criado_em);
+   INSERT INTO ticket (id, title, status, criado_em, atualizado_em) VALUES
+     ('ticket-boas-vindas', 'Como convidar minha equipe para um quadro?', 'open', '2026-11-10T13:00:00.000Z', '2026-11-10T13:02:00.000Z');
+   INSERT INTO ticket_message (id, ticket_id, role, author, content, criado_em) VALUES
+     ('msg-boas-vindas-1', 'ticket-boas-vindas', 'user', '', 'Como convidar minha equipe para um quadro?', '2026-11-10T13:00:00.000Z'),
+     ('msg-boas-vindas-2', 'ticket-boas-vindas', 'agent', 'Assistente Fluxo', 'Olá! Por enquanto os quadros são compartilhados por todos que usam o Fluxo, então sua equipe já enxerga o que você cria.
+
+Se precisar de algo mais, é só escrever aqui neste ticket.', '2026-11-10T13:02:00.000Z');`,
 ];
 
 /** `caminho` = arquivo do banco; `:memory:` nos testes. */

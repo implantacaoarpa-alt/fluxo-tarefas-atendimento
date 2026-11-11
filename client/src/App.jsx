@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.js";
 import { BarraLateral } from "./BarraLateral.jsx";
+import { TelaAtendimento } from "./TelaAtendimento.jsx";
 import { TelaQuadro } from "./TelaQuadro.jsx";
 import { Botao } from "./componentes/Botao.jsx";
 import { Campo } from "./componentes/Campo.jsx";
@@ -36,7 +37,19 @@ function EstadoVazio({ titulo, descricao, children }) {
   );
 }
 
+/** Lê a seção e o ticket aberto da URL: /atendimento, /atendimento/:id ou qualquer outra (quadros). */
+function lerRota() {
+  const partes = window.location.pathname.split("/").filter(Boolean);
+  if (partes[0] === "atendimento") return { secao: "atendimento", ticketId: partes[1] ? decodeURIComponent(partes[1]) : null };
+  return { secao: "quadros", ticketId: null };
+}
+
 export function App() {
+  const [rota, setRota] = useState(lerRota);
+  const [tickets, setTickets] = useState(null);
+  const [versaoTicket, setVersaoTicket] = useState(0);
+  // Cada clique em "Novo ticket" começa um ticket do zero, mesmo se a tela de ticket novo já estiver aberta.
+  const [novoTicket, setNovoTicket] = useState(0);
   const [quadros, setQuadros] = useState(null);
   const [quadroId, setQuadroId] = useState(null);
   const [detalhe, setDetalhe] = useState(null);
@@ -86,6 +99,50 @@ export function App() {
       });
     return () => { vivo = false; };
   }, [quadroId, tentativa]);
+
+  // Navegação pelo histórico do navegador (voltar/avançar).
+  useEffect(() => {
+    const aoVoltar = () => setRota(lerRota());
+    window.addEventListener("popstate", aoVoltar);
+    return () => window.removeEventListener("popstate", aoVoltar);
+  }, []);
+
+  const navegar = (secao, ticketId = null) => {
+    const caminho = secao === "atendimento" ? (ticketId ? `/atendimento/${encodeURIComponent(ticketId)}` : "/atendimento") : "/quadro";
+    if (window.location.pathname !== caminho) window.history.pushState(null, "", caminho);
+    setRota({ secao, ticketId });
+    setErro(null);
+  };
+
+  // Tickets: carregados ao entrar no atendimento e recarregados a cada mudança na conversa.
+  const recarregarTickets = () =>
+    api.tickets.listar().then((dados) => setTickets(dados?.tickets ?? [])).catch((e) => setErro(e.message));
+
+  useEffect(() => {
+    if (rota.secao === "atendimento") void recarregarTickets();
+  }, [rota.secao, tentativa]);
+
+  const renomearTicket = async (title) => {
+    const alvo = dialogo?.ticket;
+    if (!alvo) return;
+    await executar(async () => {
+      await api.tickets.editar(alvo.id, { title });
+      await recarregarTickets();
+      setVersaoTicket((v) => v + 1);
+      setDialogo(null);
+    });
+  };
+
+  const excluirTicket = async () => {
+    const alvo = dialogo?.ticket;
+    if (!alvo) return;
+    await executar(async () => {
+      await api.tickets.excluir(alvo.id);
+      setDialogo(null);
+      if (rota.ticketId === alvo.id) navegar("atendimento");
+      await recarregarTickets();
+    });
+  };
 
   const recarregar = () => setTentativa((t) => t + 1);
 
@@ -212,6 +269,20 @@ export function App() {
   };
 
   const conteudo = () => {
+    if (rota.secao === "atendimento") {
+      return (
+        <TelaAtendimento
+          ticketId={rota.ticketId}
+          novoTicket={novoTicket}
+          versao={versaoTicket + tentativa}
+          aoAbrirTicket={(id) => navegar("atendimento", id)}
+          aoMudou={() => void recarregarTickets()}
+          aoRenomear={(ticket) => setDialogo({ tipo: "renomear-ticket", ticket })}
+          aoExcluir={(ticket) => setDialogo({ tipo: "excluir-ticket", ticket })}
+          aoErro={setErro}
+        />
+      );
+    }
     if (quadros === null) {
       return (
         <>
@@ -254,11 +325,21 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className="app" data-secao={rota.secao}>
       <BarraLateral
+        secao={rota.secao}
+        aoNavegar={(secao) => navegar(secao)}
+        atendimento={{
+          tickets,
+          ticketId: rota.ticketId,
+          aoSelecionar: (id) => navegar("atendimento", id),
+          aoNovo: () => { navegar("atendimento"); setNovoTicket((v) => v + 1); },
+          aoRenomear: (ticket) => setDialogo({ tipo: "renomear-ticket", ticket }),
+          aoExcluir: (ticket) => setDialogo({ tipo: "excluir-ticket", ticket }),
+        }}
         quadros={quadros}
         quadroId={quadroId}
-        aoSelecionar={setQuadroId}
+        aoSelecionar={(id) => { setQuadroId(id); navegar("quadros"); }}
         aoNovoQuadro={() => setDialogo({ tipo: "novo-quadro" })}
         aoRenomear={(quadro) => setDialogo({ tipo: "renomear-quadro", quadro })}
         aoExcluir={(quadro) => setDialogo({ tipo: "excluir-quadro", quadro })}
@@ -377,6 +458,36 @@ export function App() {
             </div>
           </form>
         </Dialogo>
+      ) : null}
+
+      {dialogo?.tipo === "renomear-ticket" ? (
+        <Dialogo aberto titulo="Renomear ticket" aoFechar={() => setDialogo(null)}>
+          <form
+            className="formulario"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const titulo = String(new FormData(e.currentTarget).get("title") ?? "").trim();
+              if (titulo) void renomearTicket(titulo);
+            }}
+          >
+            <Campo rotulo="Título do ticket" name="title" defaultValue={dialogo.ticket.title} maxLength={120} required autoFocus />
+            <div className="acoes">
+              <Botao onClick={() => setDialogo(null)}>Cancelar</Botao>
+              <Botao variante="primario" type="submit">Salvar alterações</Botao>
+            </div>
+          </form>
+        </Dialogo>
+      ) : null}
+
+      {dialogo?.tipo === "excluir-ticket" ? (
+        <Confirmar
+          aberto
+          titulo="Excluir ticket"
+          descricao={`Excluir "${dialogo.ticket.title}" apaga a conversa inteira. Não dá para desfazer.`}
+          rotuloConfirmar="Excluir ticket"
+          aoConfirmar={() => void excluirTicket()}
+          aoFechar={() => setDialogo(null)}
+        />
       ) : null}
 
       {dialogo?.tipo === "excluir-cartao" ? (
